@@ -146,7 +146,7 @@ class RouteClass {
         if (!current) continue;
 
         const resolver = current[1];
-        const type = current[2];
+        const type = current[3]; // type index is now 3
 
         if (resolver) {
           if (type === "array") {
@@ -160,6 +160,13 @@ class RouteClass {
 
     } catch (err) {
       console.error("SYNC ERROR:", err);
+      // Tüm bekleyen istekleri hata ile sonlandır (reject)
+      for (let i = 0; i < order.length; i++) {
+        const current = order[i];
+        if (current && current[2]) { // rejecter
+          current[2](err);
+        }
+      }
     }
   }
 
@@ -194,16 +201,16 @@ class RouteClass {
   api(body) {
     if (Array.isArray(body)) {
       for (let i = 0; i < body.length - 1; i++) {
-        this.order.push([body[i], null, "array"]);
+        this.order.push([body[i], null, null, "array"]);
       }
 
-      return new Promise(res => {
-        this.order.push([body[body.length - 1], res, "array"]);
+      return new Promise((res, rej) => {
+        this.order.push([body[body.length - 1], res, rej, "array"]);
       });
 
     } else {
-      return new Promise(res => {
-        this.order.push([body, res, "single"]);
+      return new Promise((res, rej) => {
+        this.order.push([body, res, rej, "single"]);
       });
     }
   }
@@ -249,12 +256,14 @@ function TopluyoBOT(token){
    * @returns {Promise<any>}       Sunucu yanıtı
    */
   base.post = function(api,data){
-    return new Promise((res,req)=>{  
+    return new Promise((res,rej)=>{  
       Route.api({
         api: api,
         data: data
       }).then(r=>{
         res(r)
+      }).catch(err=>{
+        rej(err)
       });
     })
   }
@@ -311,6 +320,7 @@ function TopluyoBOT(token){
   }
 
   let reconnect = true
+  let pingInterval = null
   /**
    * WebSocket bağlantısını açar. Bağlantı koparsa 1 saniye sonra otomatik
    * olarak yeniden bağlanır (`auth_problem` olayı alınmadıkça).
@@ -322,11 +332,31 @@ function TopluyoBOT(token){
     let ws = base.ws = new WebSocket('wss://topluyo.com/!bot');
     ws.on('open', () => {
       ws.send(token);
-      setInterval(() => { if (ws.readyState === WebSocket.OPEN) { ws.ping(); } }, 30000);
+      if (pingInterval) clearInterval(pingInterval);
+      pingInterval = setInterval(() => { if (ws.readyState === WebSocket.OPEN) { ws.ping(); } }, 30000);
       emit("open")
     });
     ws.on('message', (data) => {
-      const message = JSON.parse(data);
+      let messageStr = data.toString();
+      let message;
+      
+      try {
+        message = JSON.parse(messageStr);
+      } catch (err) {
+        // Hatalı JSON durumunda mesajı kurtarmayı dene (özellikle unescaped multiline \n için)
+        try {
+          const sanitized = messageStr
+            .replace(/\n/g, "\\n")
+            .replace(/\r/g, "\\r")
+            .replace(/\t/g, "\\t");
+          message = JSON.parse(sanitized);
+        } catch (recoverErr) {
+          // İki denemede de parse edilemediyse hata event'i fırlat ve işlemi kes
+          emit("error", new Error("JSON parse error on WebSocket message: " + recoverErr.message));
+          return;
+        }
+      }
+
       if(message=="AUTH_PROBLEM"){
         reconnect=false
         emit("auth_problem")
@@ -340,12 +370,20 @@ function TopluyoBOT(token){
       emit("message",message)
     });
     ws.on('close', () => {
+      if (pingInterval) {
+        clearInterval(pingInterval);
+        pingInterval = null;
+      }
       emit("close")
       if(reconnect) {
         setTimeout(e=>base.connect(),1000)
       }
     });
     ws.on('error', (err) => {
+      if (pingInterval) {
+        clearInterval(pingInterval);
+        pingInterval = null;
+      }
       emit("error",err)
     });
   }
