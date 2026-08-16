@@ -118,12 +118,14 @@ class RouteClass {
     if (this.order.length === 0) return;
 
     const order = this.order.splice(0);
-    const body = order.map(e => ({
-      api: e[0].api,
-      data: e[0].data || {}
-    }));
+    let body = [];
 
     try {
+      body = order.map(e => ({
+        api: e[0]?.api,
+        data: e[0]?.data || {}
+      }));
+
       const res = await fetch(this.API_END_POINT + "!apis", {
         method: "POST",
         headers: {
@@ -133,7 +135,12 @@ class RouteClass {
         body: JSON.stringify(body)
       });
       const json = await res.json();
-      const responseList = Object.values(json.data);
+      
+      if (!res.ok) {
+        throw new Error(`API Error: ${res.status} ${res.statusText}`);
+      }
+      
+      const responseList = Object.values(json?.data || {});
 
       let store = [];
 
@@ -155,6 +162,17 @@ class RouteClass {
             resolver(store[0]);
           }
           store = [];
+        }
+      }
+
+      // Eksik yanıtlar için kalan istekleri hata ile reject et
+      if (responseList.length < order.length) {
+        const err = new Error("Server returned incomplete response for batch");
+        for (let i = responseList.length; i < order.length; i++) {
+          const current = order[i];
+          if (current && current[2]) {
+            current[2](err);
+          }
         }
       }
 
@@ -200,6 +218,8 @@ class RouteClass {
    */
   api(body) {
     if (Array.isArray(body)) {
+      if (body.length === 0) return Promise.resolve([]);
+
       for (let i = 0; i < body.length - 1; i++) {
         this.order.push([body[i], null, null, "array"]);
       }
@@ -256,16 +276,10 @@ function TopluyoBOT(token){
    * @returns {Promise<any>}       Sunucu yanıtı
    */
   base.post = function(api,data){
-    return new Promise((res,rej)=>{  
-      Route.api({
-        api: api,
-        data: data
-      }).then(r=>{
-        res(r)
-      }).catch(err=>{
-        rej(err)
-      });
-    })
+    return Route.api({
+      api: api,
+      data: data
+    });
   }
 
   let _triggers = []
