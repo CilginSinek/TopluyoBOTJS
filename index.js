@@ -103,7 +103,11 @@ class RouteClass {
     this.lastSyncTime = + Date.now();
     this.rateLimitMs = 1000;
 
-    setInterval(() => this.autoSync(), 200);
+    this.syncInterval = setInterval(() => this.autoSync(), 200);
+  }
+
+  destroy() {
+    clearInterval(this.syncInterval);
   }
 
   /**
@@ -121,10 +125,15 @@ class RouteClass {
     let body = [];
 
     try {
-      body = order.map(e => ({
-        api: e[0]?.api,
-        data: e[0]?.data || {}
-      }));
+      body = order.map((e, index) => {
+        if (!e[0] || !e[0].api) {
+          throw new Error(`Invalid request format at index ${index}: missing api endpoint.`);
+        }
+        return {
+          api: e[0].api,
+          data: e[0].data || {}
+        };
+      });
 
       const res = await fetch(this.API_END_POINT + "!apis", {
         method: "POST",
@@ -140,12 +149,12 @@ class RouteClass {
         throw new Error(`API Error: ${res.status} ${res.statusText}`);
       }
       
-      const responseList = Object.values(json?.data || {});
+      const dataObj = json?.data || {};
 
       let store = [];
 
-      for (let i = 0; i < responseList.length; i++) {
-        const d = responseList[i];
+      for (let i = 0; i < order.length; i++) {
+        const d = dataObj[i]; // Sunucudan dönen objeden ilgili indexi (key'i) buluyoruz
         store.push(d);
 
         const current = order[i];
@@ -153,26 +162,25 @@ class RouteClass {
         if (!current) continue;
 
         const resolver = current[1];
-        const type = current[3]; // type index is now 3
+        const rejecter = current[2];
+        const type = current[3];
 
-        if (resolver) {
+        if (resolver || rejecter) {
           if (type === "array") {
-            resolver(store);
+            const errItem = store.find(item => !item || item.error);
+            if (errItem) {
+              if (rejecter) rejecter(new Error(errItem.error || "Missing or invalid response from server"));
+            } else {
+              if (resolver) resolver(store);
+            }
           } else {
-            resolver(store[0]);
+            if (!d || d.error) {
+              if (rejecter) rejecter(new Error(d?.error || "Missing or invalid response from server"));
+            } else {
+              if (resolver) resolver(d);
+            }
           }
           store = [];
-        }
-      }
-
-      // Eksik yanıtlar için kalan istekleri hata ile reject et
-      if (responseList.length < order.length) {
-        const err = new Error("Server returned incomplete response for batch");
-        for (let i = responseList.length; i < order.length; i++) {
-          const current = order[i];
-          if (current && current[2]) {
-            current[2](err);
-          }
         }
       }
 
@@ -323,7 +331,7 @@ function TopluyoBOT(token){
    * @returns {void}
    */
   const emit = function(event,data){
-    _triggers.map(e=>{
+    _triggers.forEach(e=>{
       if(e.event==event){
         e.callback.call(base,data)
       }
@@ -335,9 +343,10 @@ function TopluyoBOT(token){
 
   let reconnect = true
   let pingInterval = null
+  let reconnectCount = 0
   /**
-   * WebSocket bağlantısını açar. Bağlantı koparsa 1 saniye sonra otomatik
-   * olarak yeniden bağlanır (`auth_problem` olayı alınmadıkça).
+   * WebSocket bağlantısını açar. Bağlantı koparsa artan gecikme (exponential backoff)
+   * ile otomatik olarak yeniden bağlanır (`auth_problem` olayı alınmadıkça).
    * `TopluyoBOT()` tarafından çağrıldığında otomatik olarak tetiklenir.
    *
    * @returns {void}
@@ -346,6 +355,7 @@ function TopluyoBOT(token){
     let ws = base.ws = new WebSocket('wss://topluyo.com/!bot');
     ws.on('open', () => {
       ws.send(token);
+      reconnectCount = 0; // Başarılı bağlantıda sayacı sıfırla
       if (pingInterval) clearInterval(pingInterval);
       pingInterval = setInterval(() => { if (ws.readyState === WebSocket.OPEN) { ws.ping(); } }, 30000);
       emit("open")
@@ -390,7 +400,9 @@ function TopluyoBOT(token){
       }
       emit("close")
       if(reconnect) {
-        setTimeout(e=>base.connect(),1000)
+        let delay = Math.min(1000 * Math.pow(2, reconnectCount), 30000);
+        reconnectCount++;
+        setTimeout(e=>base.connect(), delay)
       }
     });
     ws.on('error', (err) => {
@@ -400,6 +412,18 @@ function TopluyoBOT(token){
       }
       emit("error",err)
     });
+  }
+
+  base.destroy = function() {
+    reconnect = false;
+    if (pingInterval) {
+      clearInterval(pingInterval);
+      pingInterval = null;
+    }
+    if (base.ws) {
+      base.ws.close();
+    }
+    Route.destroy();
   }
 
   base.connect()

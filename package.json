@@ -1,6 +1,6 @@
 {
   "name": "topluyo-bot",
-  "version": "1.5.2",
+  "version": "1.5.3",
   "description": "TopluyoBOT - Topluyo platform bot library for JavaScript and TypeScript",
   "main": "./index.js",
   "module": "./index.mjs",
